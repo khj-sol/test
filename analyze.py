@@ -1,9 +1,9 @@
-"""Command line tool for basic technical analysis of equities using Yahoo Finance data."""
+"""기술적 지표를 이용해 주식을 분석하는 간단한 CLI 스크립트."""
+
 from __future__ import annotations
 
-import argparse
 import sys
-from typing import Optional
+from typing import Tuple
 
 import pandas as pd
 import yfinance as yf
@@ -16,56 +16,8 @@ MACD_COLUMN = "MACD_12_26_9"
 MACD_SIGNAL_COLUMN = "MACDs_12_26_9"
 
 
-def download_stock_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """Download historical stock data for the given ticker.
-
-    Parameters
-    ----------
-    ticker: str
-        Stock symbol accepted by Yahoo Finance.
-    period: str
-        History length (for example ``"1y"`` or ``"6mo"``).
-    interval: str
-        Sample interval, such as ``"1d"`` or ``"1h"``.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Downloaded OHLCV data.
-
-    Raises
-    ------
-    ValueError
-        If Yahoo Finance returns an empty dataset.
-    """
-
-    data = yf.download(ticker, period=period, interval=interval, progress=False)
-    if data.empty:
-        raise ValueError(
-            f"'{ticker}'에 대한 데이터를 찾을 수 없습니다. 티커와 기간/간격을 확인해 주세요."
-        )
-    return data
-
-
-def compute_indicators(data: pd.DataFrame) -> pd.DataFrame:
-    """Append technical indicators to the provided dataframe."""
-
-    data = data.copy()
-    close = data["Close"]
-
-    data[RSI_COLUMN] = calculate_rsi(close, length=14)
-    data[SMA20_COLUMN] = close.rolling(window=20, min_periods=20).mean()
-    data[SMA50_COLUMN] = close.rolling(window=50, min_periods=50).mean()
-
-    macd_line, signal_line = calculate_macd(close, fast=12, slow=26, signal=9)
-    data[MACD_COLUMN] = macd_line
-    data[MACD_SIGNAL_COLUMN] = signal_line
-
-    return data
-
-
-def calculate_rsi(close: pd.Series, *, length: int) -> pd.Series:
-    """Return the Relative Strength Index for the given closing prices."""
+def calculate_rsi(close: pd.Series, length: int = 14) -> pd.Series:
+    """수익률을 기반으로 RSI(Relative Strength Index)를 계산합니다."""
 
     delta = close.diff()
     gains = delta.clip(lower=0)
@@ -74,18 +26,18 @@ def calculate_rsi(close: pd.Series, *, length: int) -> pd.Series:
     average_gain = gains.rolling(window=length, min_periods=length).mean()
     average_loss = losses.rolling(window=length, min_periods=length).mean()
 
-    zero_loss_mask = average_loss == 0
+    zero_loss = average_loss == 0
     average_loss = average_loss.replace(0, pd.NA)
     rs = average_gain / average_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.where(~zero_loss_mask, 100)
+    rsi = rsi.where(~zero_loss, 100)
     return rsi
 
 
 def calculate_macd(
-    close: pd.Series, *, fast: int, slow: int, signal: int
-) -> tuple[pd.Series, pd.Series]:
-    """Return MACD and signal line series for the given closing prices."""
+    close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
+) -> Tuple[pd.Series, pd.Series]:
+    """MACD와 시그널 선을 계산합니다."""
 
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
@@ -94,144 +46,99 @@ def calculate_macd(
     return macd_line, signal_line
 
 
-def format_float(value: float) -> str:
-    """Format a float value consistently for CLI output."""
+def append_indicators(data: pd.DataFrame) -> pd.DataFrame:
+    """주가 데이터프레임에 주요 기술적 지표 열을 추가합니다."""
 
-    return f"{value:.2f}"
+    data = data.copy()
+    close = data["Close"]
+
+    data[RSI_COLUMN] = calculate_rsi(close)
+    data[SMA20_COLUMN] = close.rolling(window=20, min_periods=20).mean()
+    data[SMA50_COLUMN] = close.rolling(window=50, min_periods=50).mean()
+
+    macd_line, signal_line = calculate_macd(close)
+    data[MACD_COLUMN] = macd_line
+    data[MACD_SIGNAL_COLUMN] = signal_line
+    return data
 
 
-def analyze_stock(
-    ticker: str,
-    *,
-    period: str = "1y",
-    interval: str = "1d",
-    export_path: Optional[str] = None,
-) -> bool:
-    """Perform technical analysis for the given ticker.
-
-    Returns ``True`` if the analysis succeeded; otherwise ``False``.
-    """
-
-    try:
-        data = download_stock_data(ticker, period, interval)
-    except ValueError as error:
-        print(f"오류: {error}")
-        return False
-    except Exception as error:  # pragma: no cover - defensive logging
-        print(f"데이터 다운로드 중 예상치 못한 오류 발생: {error}")
-        return False
+def analyze_stock(ticker: str) -> None:
+    """주어진 티커에 대한 기술적 분석을 수행하고 결과를 출력합니다."""
 
     try:
-        enriched_data = compute_indicators(data)
-    except Exception as error:  # pragma: no cover - defensive logging
-        print(f"보조 지표 계산 중 오류 발생: {error}")
-        return False
+        data = yf.download(ticker, period="1y", interval="1d", progress=False)
+        if data.empty:
+            print(f"오류: '{ticker}'에 대한 데이터를 찾을 수 없습니다. 티커를 확인해 주세요.")
+            return
 
-    latest_data = enriched_data.iloc[-1]
+        data = append_indicators(data)
+        latest_data = data.iloc[-1]
 
-    print("---" * 15)
-    print(
-        f"📊 {ticker} 기술적 분석 결과 (최근 거래일: "
-        f"{latest_data.name.strftime('%Y-%m-%d')})"
-    )
-    print("---" * 15)
-
-    print(f"종가: ${format_float(latest_data['Close'])}")
-    print("\n--- 주요 지표 ---")
-
-    rsi_14 = latest_data.get(RSI_COLUMN)
-    if pd.notna(rsi_14):
-        print(f"RSI (14일): {format_float(rsi_14)}")
-        if rsi_14 > 70:
-            print("  -> 📈 상태: 과매수 구간 (과열)")
-        elif rsi_14 < 30:
-            print("  -> 📉 상태: 과매도 구간 (침체)")
-        else:
-            print("  -> 📊 상태: 중립 구간")
-    else:
-        print("RSI (14일): 계산되지 않았습니다.")
-
-    sma_20 = latest_data.get(SMA20_COLUMN)
-    sma_50 = latest_data.get(SMA50_COLUMN)
-    print("\n이동평균선 (SMA):")
-    if pd.notna(sma_20):
-        print(f"  - 20일선: ${format_float(sma_20)}")
-    else:
-        print("  - 20일선: 계산되지 않았습니다.")
-    if pd.notna(sma_50):
-        print(f"  - 50일선: ${format_float(sma_50)}")
-    else:
-        print("  - 50일선: 계산되지 않았습니다.")
-    if pd.notna(sma_20) and pd.notna(sma_50):
-        if sma_20 > sma_50:
-            print("  -> 📈 상태: 단기 골든 크로스 (상승 추세)")
-        else:
-            print("  -> 📉 상태: 단기 데드 크로스 (하락 추세)")
-
-    macd_line = latest_data.get(MACD_COLUMN)
-    signal_line = latest_data.get(MACD_SIGNAL_COLUMN)
-    print("\nMACD (12, 26, 9):")
-    if pd.notna(macd_line):
-        print(f"  - MACD 선: {format_float(macd_line)}")
-    else:
-        print("  - MACD 선: 계산되지 않았습니다.")
-    if pd.notna(signal_line):
-        print(f"  - 시그널 선: {format_float(signal_line)}")
-    else:
-        print("  - 시그널 선: 계산되지 않았습니다.")
-    if pd.notna(macd_line) and pd.notna(signal_line):
-        if macd_line > signal_line:
-            print("  -> 📈 상태: 매수 신호 (상승 모멘텀)")
-        else:
-            print("  -> 📉 상태: 매도 신호 (하락 모멘텀)")
-
-    if export_path:
-        try:
-            enriched_data.to_csv(export_path)
-            print(f"\n데이터가 '{export_path}' 파일로 저장되었습니다.")
-        except Exception as error:  # pragma: no cover - file system issues
-            print(f"CSV 저장 중 오류 발생: {error}")
-
-    return True
-
-
-def build_argument_parser() -> argparse.ArgumentParser:
-    """Create an argument parser for the CLI interface."""
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "Yahoo Finance 데이터를 이용해 주식의 주요 기술 지표를 계산하고 출력합니다."
+        print("---" * 15)
+        print(
+            f"📊 {ticker} 기술적 분석 결과 (최근 거래일: "
+            f"{latest_data.name.strftime('%Y-%m-%d')})"
         )
-    )
-    parser.add_argument("ticker", help="분석할 주식 코드 (예: AAPL, 005930.KS)")
-    parser.add_argument(
-        "--period",
-        default="1y",
-        help="데이터 기간 (예: 1mo, 6mo, 1y, 5y). 기본값은 1y 입니다.",
-    )
-    parser.add_argument(
-        "--interval",
-        default="1d",
-        help="데이터 간격 (예: 1d, 1h, 30m). 기본값은 1d 입니다.",
-    )
-    parser.add_argument(
-        "--export",
-        help="보조 지표가 포함된 전체 데이터를 CSV 파일로 저장합니다.",
-    )
-    return parser
+        print("---" * 15)
 
+        print(f"종가: ${latest_data['Close']:.2f}")
+        print("\n--- 주요 지표 ---")
 
-def main(argv: Optional[list[str]] = None) -> int:
-    """Entry point used by the command line script."""
+        rsi_14 = latest_data.get(RSI_COLUMN)
+        if pd.notna(rsi_14):
+            print(f"RSI (14일): {rsi_14:.2f}")
+            if rsi_14 > 70:
+                print("  -> 📈 상태: 과매수 구간 (과열)")
+            elif rsi_14 < 30:
+                print("  -> 📉 상태: 과매도 구간 (침체)")
+            else:
+                print("  -> 📊 상태: 중립 구간")
+        else:
+            print("RSI (14일): 계산되지 않았습니다.")
 
-    parser = build_argument_parser()
-    args = parser.parse_args(argv)
+        sma_20 = latest_data.get(SMA20_COLUMN)
+        sma_50 = latest_data.get(SMA50_COLUMN)
+        print("\n이동평균선 (SMA):")
+        if pd.notna(sma_20):
+            print(f"  - 20일선: ${sma_20:.2f}")
+        else:
+            print("  - 20일선: 계산되지 않았습니다.")
+        if pd.notna(sma_50):
+            print(f"  - 50일선: ${sma_50:.2f}")
+        else:
+            print("  - 50일선: 계산되지 않았습니다.")
+        if pd.notna(sma_20) and pd.notna(sma_50):
+            if sma_20 > sma_50:
+                print("  -> 📈 상태: 단기 골든 크로스 (상승 추세)")
+            else:
+                print("  -> 📉 상태: 단기 데드 크로스 (하락 추세)")
 
-    success = analyze_stock(
-        args.ticker.upper(), period=args.period, interval=args.interval, export_path=args.export
-    )
-    return 0 if success else 1
+        macd_line = latest_data.get(MACD_COLUMN)
+        signal_line = latest_data.get(MACD_SIGNAL_COLUMN)
+        print("\nMACD (12, 26, 9):")
+        if pd.notna(macd_line):
+            print(f"  - MACD 선: {macd_line:.2f}")
+        else:
+            print("  - MACD 선: 계산되지 않았습니다.")
+        if pd.notna(signal_line):
+            print(f"  - 시그널 선: {signal_line:.2f}")
+        else:
+            print("  - 시그널 선: 계산되지 않았습니다.")
+        if pd.notna(macd_line) and pd.notna(signal_line):
+            if macd_line > signal_line:
+                print("  -> 📈 상태: 매수 신호 (상승 모멘텀)")
+            else:
+                print("  -> 📉 상태: 매도 신호 (하락 모멘텀)")
+
+    except Exception as error:
+        print(f"분석 중 오류 발생: {error}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if len(sys.argv) < 2:
+        print("사용법: python analyze.py [주식코드]")
+        print("예시 (애플): python analyze.py AAPL")
+        print("예시 (삼성전자): python analyze.py 005930.KS")
+    else:
+        stock_ticker = sys.argv[1].upper()
+        analyze_stock(stock_ticker)
