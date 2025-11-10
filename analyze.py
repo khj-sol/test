@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import sys
 from typing import Optional, Any
+import datetime  # 날짜 처리를 위해 추가
 
 import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
+from pykrx import stock  # [!!! 신규 라이브러리 임포트 !!!]
 
 # 보조 지표 컬럼 이름을 상수로 정의
 RSI_COLUMN = "RSI_14"
@@ -18,15 +20,14 @@ MACD_SIGNAL_COLUMN = "MACDs_12_26_9"
 
 
 def download_stock_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """Download historical stock data for the given ticker."""
-
-    # auto_adjust=False로 설정하여 'Close'와 'Adj Close'를 모두 받습니다.
+    """Download historical stock data for the given ticker. (Using yfinance for all)"""
+    # 기술적 분석 데이터는 yfinance가 .KS도 잘 제공하므로 일관성을 위해 유지
     data = yf.download(
         ticker,
         period=period,
         interval=interval,
         progress=False,
-        auto_adjust=False  # 수정 종가를 따로 받기 위해 False 유지
+        auto_adjust=False
     )
 
     if data.empty:
@@ -34,62 +35,75 @@ def download_stock_data(ticker: str, period: str, interval: str) -> pd.DataFrame
             f"'{ticker}'에 대한 데이터를 찾을 수 없습니다. 티커와 기간/간격을 확인해 주세요."
         )
 
-    # yfinance가 ('Open', 'PLTR') 같은 MultiIndex를 반환할 경우,
-    # level 1 (티커)을 삭제하고 level 0 (지표)만 남깁니다.
     if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.droplevel(1) # 0이 아닌 1을 삭제
+        data.columns = data.columns.droplevel(1)
 
-    # 모든 컬럼 이름을 소문자로 변경합니다.
     data.columns = data.columns.str.lower()
 
-    # 'adj close' (수정 종가)가 있는지 확인합니다.
     if 'adj close' in data.columns:
-        # 'close' (실제 종가)가 있다면, 분석에 필요 없으므로 삭제합니다.
         if 'close' in data.columns:
             data = data.drop(columns=['close'])
-        
-        # 'adj close' (수정 종가)를 'close'로 이름을 변경하여 분석에 사용합니다.
         data.rename(columns={'adj close': 'close'}, inplace=True)
-        
-    elif 'close' in data.columns:
-        # 'adj close'가 없고 'close'만 있는 경우 (예: 암호화폐)
-        # 'close'를 그대로 사용합니다.
-        pass
-    else:
-        # 둘 다 없는 경우 오류 발생
+    elif 'close' not in data.columns:
         raise ValueError(f"데이터에 'close' 또는 'adj close' 컬럼이 없습니다. 사용 가능한 컬럼: {list(data.columns)}")
 
     return data
 
 
-# [!!! 신규 함수 !!!]
-def get_fundamental_data(ticker_str: str) -> dict[str, Any]:
-    """Get key fundamental metrics for the given ticker."""
+# [!!! 핵심 수정: get_fundamental_data 함수 전체 변경 !!!]
+def get_fundamental_data(ticker_str: str, latest_trading_day: str) -> dict[str, Any]:
+    """Get key fundamental metrics based on the ticker type."""
+    fundamentals = {}
     try:
-        stock = yf.Ticker(ticker_str)
-        info = stock.info
+        # 1. 한국 주식(.KS, .KQ)인 경우
+        if ticker_str.endswith((".KS", ".KQ")):
+            kr_ticker = ticker_str.split('.')[0] # '005930.KS' -> '005930'
+            
+            # pykrx는 날짜가 필요함. yfinance에서 받은 최근 거래일을 사용
+            funda_date_str = latest_trading_day.replace("-", "") # '2025-11-10' -> '20251110'
+            
+            # 해당 날짜의 모든 주식 기본 정보를 가져옴
+            df_funda = stock.get_market_fundamental(funda_date_str)
+            
+            # 해당 티커의 정보(행)를 추출
+            info = df_funda.loc[kr_ticker]
+            
+            fundamentals = {
+                'per': info.get('PER'),
+                'pbr': info.get('PBR'),
+            }
+            
+            # ROE = (EPS / BPS) * 100
+            eps = info.get('EPS')
+            bps = info.get('BPS')
+            
+            if pd.notna(eps) and pd.notna(bps) and bps != 0:
+                # pykrx의 ROE는 yfinance와 달리 비율(0.15)이 아니므로, 
+                # (EPS/BPS)로 직접 계산하여 비율(ratio)로 저장
+                fundamentals['roe'] = (eps / bps) 
+            else:
+                fundamentals['roe'] = None
+
+        # 2. 미국 주식 (또는 그 외)인 경우
+        else:
+            stock_yf = yf.Ticker(ticker_str)
+            info = stock_yf.info
+            fundamentals = {
+                'per': info.get('trailingPE'),      # PER (과거 12개월)
+                'pbr': info.get('priceToBook'),      # PBR
+                'roe': info.get('returnOnEquity'),   # ROE (이미 비율로 제공됨)
+            }
         
-        # .info 딕셔너리에서 주요 지표 추출
-        # .get()을 사용하면 해당 키가 없을 때 오류 대신 None을 반환
-        fundamentals = {
-            'per': info.get('trailingPE'),      # PER (과거 12개월)
-            'forward_per': info.get('forwardPE'),  # Forward PER (향후 12개월 예상)
-            'pbr': info.get('priceToBook'),      # PBR
-            'roe': info.get('returnOnEquity'),   # ROE
-            'margin': info.get('profitMargins')  # 순이익률
-        }
         return fundamentals
+        
     except Exception as e:
-        print(f"\n[경고] 기본적 분석 데이터 가져오기 실패: (일부 티커는 지원 안됨) {e}")
+        print(f"\n[경고] 기본적 분석 데이터 가져오기 실패: {e}")
         return {} # 실패 시 빈 딕셔너리 반환
 
 
 def compute_indicators(data: pd.DataFrame) -> pd.DataFrame:
     """Append technical indicators to the provided dataframe."""
-
     data = data.copy()
-    
-    # 'close' 컬럼 (수정 종가)을 명시적으로 지정합니다.
     try:
         data.ta.rsi(close='close', length=14, append=True)
         data.ta.macd(close='close', fast=12, slow=26, signal=9, append=True)
@@ -98,13 +112,11 @@ def compute_indicators(data: pd.DataFrame) -> pd.DataFrame:
     except Exception as e:
         print(f"보조 지표 계산 중 오류 발생 (데이터 컬럼 확인 필요): {e}")
         pass 
-
     return data
 
 
 def format_float(value: float) -> str:
     """Format a float value consistently for CLI output."""
-
     return f"{value:.2f}"
 
 
@@ -119,11 +131,9 @@ def analyze_stock(
     Returns ``True`` if the analysis succeeded; otherwise ``False``.
     """
     
-    # --- [데이터 수집] ---
+    # --- [데이터 수집 1: 기술적 분석] ---
     try:
         data = download_stock_data(ticker, period, interval)
-        # [!!! 수정 !!!] 기본적 분석 데이터도 함께 가져옴
-        fundamentals = get_fundamental_data(ticker) 
     except ValueError as error:
         print(f"오류: {error}")
         return False
@@ -140,11 +150,14 @@ def analyze_stock(
     try:
         # --- [기술적 분석 결과 출력] ---
         latest_data = enriched_data.iloc[-1]
+        
+        # [!!! 수정 !!!] 기본적 분석을 위해 최근 거래일 추출
+        latest_date_str = latest_data.name.strftime('%Y-%m-%d')
 
         print("---" * 15)
         print(
             f"📊 {ticker} 기술적 분석 결과 (최근 거래일: "
-            f"{latest_data.name.strftime('%Y-%m-%d')})"
+            f"{latest_date_str})"
         )
         print("---" * 15)
 
@@ -206,11 +219,12 @@ def analyze_stock(
             else:
                 print("  -> 📉 상태: 매도 신호 (하락 모멘텀)")
         
+        # --- [데이터 수집 2: 기본적 분석] ---
+        # [!!! 수정 !!!] 기술적 분석이 끝난 후, 최근 거래일을 인자로 넘겨 호출
+        fundamentals = get_fundamental_data(ticker, latest_date_str)
 
-        # --- [!!! 신규 추가: 기본적 분석 결과 출력 !!!] ---
-        print("\n--- 💼 기본적 분석 지표 (참고용) ---")
-        print("   (경고: 산업별, 시장별 기준이 다르므로 단순 참고만 하세요.)")
-
+        # --- [기본적 분석 결과 출력] ---
+        
         if not fundamentals:
             print("  (기본적 분석 데이터를 가져오는 데 실패했습니다.)")
         else:
@@ -242,7 +256,7 @@ def analyze_stock(
             else:
                 print("\nPBR: N/A (데이터 없음)")
             
-            # ROE 평가 (백분율로 변환)
+            # ROE 평가 (yfinance와 pykrx(계산값) 모두 '비율'로 통일됨)
             roe = fundamentals.get('roe')
             if roe and pd.notna(roe):
                 print(f"\nROE (자기자본이익률): {roe * 100:.2f}%")
@@ -256,6 +270,8 @@ def analyze_stock(
                 print("\nROE: N/A (데이터 없음)")
         # --- [기본적 분석 끝] ---
         
+
+        # --- [매매 신호 로직] ---
 
         all_metrics_valid = (
             pd.notna(sma_20) and pd.notna(sma_50) and
@@ -282,11 +298,10 @@ def analyze_stock(
 
         else:
             print("\n💡 신호: (데이터 부족으로 신호를 생성할 수 없습니다.)")
-        # --- [신규 로직 끝] ---
 
     except Exception as error:
         print(f"분석 중 오류 발생: {error}")
-        return False # 분석 중 에러가 나도 실패로 간주
+        return False
 
     if export_path:
         try:
@@ -303,7 +318,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Yahoo Finance 데이터를 이용해 주식의 기술적/기본적 지표를 계산하고 출력합니다."
+            "Yahoo Finance와 pykrx 데이터를 이용해 주식의 기술적/기본적 지표를 계산하고 출력합니다."
         )
     )
     parser.add_argument("ticker", help="분석할 주식 코드 (예: AAPL, 005930.KS)")
