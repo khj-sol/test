@@ -148,7 +148,32 @@ def analyze_stock(
         if macd_line > signal_line:
             print("  -> 📈 상태: 매수 신호 (상승 모멘텀)")
         else:
-            print("  -> 📉 상태: 매도 신호 (하락 모멘텀)")
+            print("  - 50일선: 계산되지 않았습니다.")
+        if pd.notna(sma_20) and pd.notna(sma_50):
+            if sma_20 > sma_50:
+                print("  -> 📈 상태: 단기 골든 크로스 (상승 추세)")
+            else:
+                print("  -> 📉 상태: 단기 데드 크로스 (하락 추세)")
+
+        macd_line = latest_data.get(MACD_COLUMN)
+        signal_line = latest_data.get(MACD_SIGNAL_COLUMN)
+        print("\nMACD (12, 26, 9):")
+        if pd.notna(macd_line):
+            print(f"  - MACD 선: {macd_line:.2f}")
+        else:
+            print("  - MACD 선: 계산되지 않았습니다.")
+        if pd.notna(signal_line):
+            print(f"  - 시그널 선: {signal_line:.2f}")
+        else:
+            print("  - 시그널 선: 계산되지 않았습니다.")
+        if pd.notna(macd_line) and pd.notna(signal_line):
+            if macd_line > signal_line:
+                print("  -> 📈 상태: 매수 신호 (상승 모멘텀)")
+            else:
+                print("  -> 📉 상태: 매도 신호 (하락 모멘텀)")
+
+    except Exception as error:
+        print(f"분석 중 오류 발생: {error}")
 
     if export_path:
         try:
